@@ -1,30 +1,18 @@
-/* hfp.c
-Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-    * Redistributions of source code must retain the above copyright
-      notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above
-      copyright notice, this list of conditions and the following
-      disclaimer in the documentation and/or other materials provided
-      with the distribution.
-    * Neither the name of The Linux Foundation nor the names of its
-      contributors may be used to endorse or promote products derived
-      from this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED
-WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT
-ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS
-BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
-BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
-OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
-IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.*/
+/*
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 #define LOG_TAG "audio_hw_hfp"
 /*#define LOG_NDEBUG 0*/
@@ -40,18 +28,11 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.*/
 #include <stdlib.h>
 #include <cutils/str_parms.h>
 
-#ifdef HFP_ENABLED
-#define AUDIO_PARAMETER_HFP_ENABLE      "hfp_enable"
+#define AUDIO_PARAMETER_HFP_ENABLE            "hfp_enable"
 #define AUDIO_PARAMETER_HFP_SET_SAMPLING_RATE "hfp_set_sampling_rate"
-#define AUDIO_PARAMETER_KEY_HFP_VOLUME "hfp_volume"
-
-#ifdef PLATFORM_MSM8994
-#define HFP_RX_VOLUME     "SEC AUXPCM LOOPBACK Volume"
-#elif defined PLATFORM_MSM8996
-#define HFP_RX_VOLUME     "PRI AUXPCM LOOPBACK Volume"
-#else
-#define HFP_RX_VOLUME     "Internal HFP RX Volume"
-#endif
+#define AUDIO_PARAMETER_KEY_HFP_VOLUME        "hfp_volume"
+#define AUDIO_PARAMETER_HFP_VOL_MIXER_CTL     "hfp_vol_mixer_ctl"
+#define AUDIO_PARAMATER_HFP_VALUE_MAX         128
 
 static int32_t start_hfp(struct audio_device *adev,
                                struct str_parms *parms);
@@ -63,8 +44,9 @@ struct hfp_module {
     struct pcm *hfp_sco_tx;
     struct pcm *hfp_pcm_rx;
     struct pcm *hfp_pcm_tx;
-    bool is_hfp_running;
-    float hfp_volume;
+    float  hfp_volume;
+    char   hfp_vol_mixer_ctl[AUDIO_PARAMATER_HFP_VALUE_MAX];
+    bool   is_hfp_running;
     audio_usecase_t ucid;
 };
 
@@ -74,6 +56,7 @@ static struct hfp_module hfpmod = {
     .hfp_pcm_rx = NULL,
     .hfp_pcm_tx = NULL,
     .hfp_volume = 0,
+    .hfp_vol_mixer_ctl = {0, },
     .is_hfp_running = 0,
     .ucid = USECASE_AUDIO_HFP_SCO,
 };
@@ -92,12 +75,10 @@ static int32_t hfp_set_volume(struct audio_device *adev, float value)
 {
     int32_t vol, ret = 0;
     struct mixer_ctl *ctl;
-    const char *mixer_ctl_name = HFP_RX_VOLUME;
 
     ALOGV("%s: entry", __func__);
     ALOGD("%s: (%f)\n", __func__, value);
 
-    hfpmod.hfp_volume = value;
     if (value < 0.0) {
         ALOGW("%s: (%f) Under 0.0, assuming 0.0\n", __func__, value);
         value = 0.0;
@@ -106,6 +87,7 @@ static int32_t hfp_set_volume(struct audio_device *adev, float value)
         ALOGW("%s: Volume brought with in range (%f)\n", __func__, value);
     }
     vol  = lrint((value * 0x2000) + 0.5);
+    hfpmod.hfp_volume = value;
 
     if (!hfpmod.is_hfp_running) {
         ALOGV("%s: HFP not active, ignoring set_hfp_volume call", __func__);
@@ -113,10 +95,19 @@ static int32_t hfp_set_volume(struct audio_device *adev, float value)
     }
 
     ALOGD("%s: Setting HFP volume to %d \n", __func__, vol);
-    ctl = mixer_get_ctl_by_name(adev->mixer, mixer_ctl_name);
+    if (0 == hfpmod.hfp_vol_mixer_ctl[0]) {
+#ifdef EXTERNAL_BT_SUPPORTED
+        strcpy(hfpmod.hfp_vol_mixer_ctl, "PRI AUXPCM LOOPBACK Volume");
+#else
+        strcpy(hfpmod.hfp_vol_mixer_ctl, "Internal HFP RX Volume");
+#endif
+        ALOGW("%s: Defaulting hfp mixer control to: %s",
+                 __func__, hfpmod.hfp_vol_mixer_ctl);
+    }
+    ctl = mixer_get_ctl_by_name(adev->mixer, hfpmod.hfp_vol_mixer_ctl);
     if (!ctl) {
         ALOGE("%s: Could not get ctl for mixer cmd - %s",
-              __func__, mixer_ctl_name);
+              __func__, hfpmod.hfp_vol_mixer_ctl);
         return -EINVAL;
     }
     if(mixer_ctl_set_value(ctl, 0, vol) < 0) {
@@ -136,12 +127,10 @@ static int32_t start_hfp(struct audio_device *adev,
     int32_t pcm_dev_rx_id, pcm_dev_tx_id, pcm_dev_asm_rx_id, pcm_dev_asm_tx_id;
 
     ALOGD("%s: enter", __func__);
+    adev->enable_hfp = true;
+    platform_set_mic_mute(adev->platform, false);
 
     uc_info = (struct audio_usecase *)calloc(1, sizeof(struct audio_usecase));
-
-    if (!uc_info)
-        return -ENOMEM;
-
     uc_info->id = hfpmod.ucid;
     uc_info->type = PCM_HFP_CALL;
     uc_info->stream.out = adev->primary_output;
@@ -206,26 +195,10 @@ static int32_t start_hfp(struct audio_device *adev,
         ret = -EIO;
         goto exit;
     }
-    if (pcm_start(hfpmod.hfp_sco_rx) < 0) {
-        ALOGE("%s: pcm start for hfp sco rx failed", __func__);
-        ret = -EINVAL;
-        goto exit;
-    }
-    if (pcm_start(hfpmod.hfp_sco_tx) < 0) {
-        ALOGE("%s: pcm start for hfp sco tx failed", __func__);
-        ret = -EINVAL;
-        goto exit;
-    }
-    if (pcm_start(hfpmod.hfp_pcm_rx) < 0) {
-        ALOGE("%s: pcm start for hfp pcm rx failed", __func__);
-        ret = -EINVAL;
-        goto exit;
-    }
-    if (pcm_start(hfpmod.hfp_pcm_tx) < 0) {
-        ALOGE("%s: pcm start for hfp pcm tx failed", __func__);
-        ret = -EINVAL;
-        goto exit;
-    }
+    pcm_start(hfpmod.hfp_sco_rx);
+    pcm_start(hfpmod.hfp_sco_tx);
+    pcm_start(hfpmod.hfp_pcm_rx);
+    pcm_start(hfpmod.hfp_pcm_tx);
 
     hfpmod.is_hfp_running = true;
     hfp_set_volume(adev, hfpmod.hfp_volume);
@@ -272,15 +245,22 @@ static int32_t stop_hfp(struct audio_device *adev)
         return -EINVAL;
     }
 
-    /* 2. Disable echo reference while stopping hfp */
-    platform_set_echo_reference(adev, false, uc_info->devices);
-
-    /* 3. Get and set stream specific mixer controls */
+    /* 2. Get and set stream specific mixer controls */
     disable_audio_route(adev, uc_info);
 
-    /* 4. Disable the rx and tx devices */
+    /* 3. Disable the rx and tx devices */
     disable_snd_device(adev, uc_info->out_snd_device);
     disable_snd_device(adev, uc_info->in_snd_device);
+
+    /* Disable the echo reference for HFP Tx */
+    platform_set_echo_reference(adev, false, AUDIO_DEVICE_NONE);
+
+    /* Set the unmute Tx mixer control */
+    if (voice_get_mic_mute(adev)) {
+        platform_set_mic_mute(adev->platform, false);
+        ALOGD("%s: unMute HFP Tx", __func__);
+    }
+    adev->enable_hfp = false;
 
     list_remove(&uc_info->list);
     free(uc_info);
@@ -311,7 +291,7 @@ void audio_extn_hfp_set_parameters(struct audio_device *adev, struct str_parms *
     int rate;
     int val;
     float vol;
-    char value[32]={0};
+    char value[AUDIO_PARAMATER_HFP_VALUE_MAX] = {0, };
 
     ret = str_parms_get_str(parms, AUDIO_PARAMETER_HFP_ENABLE, value,
                             sizeof(value));
@@ -348,6 +328,15 @@ void audio_extn_hfp_set_parameters(struct audio_device *adev, struct str_parms *
     }
 
     memset(value, 0, sizeof(value));
+    ret = str_parms_get_str(parms, AUDIO_PARAMETER_HFP_VOL_MIXER_CTL,
+                          value, sizeof(value));
+    if (ret >= 0) {
+        ALOGD("%s: mixer ctl name: %s", __func__, value);
+        strcpy(hfpmod.hfp_vol_mixer_ctl, value);
+        str_parms_del(parms, AUDIO_PARAMETER_HFP_VOL_MIXER_CTL);
+    }
+
+    memset(value, 0, sizeof(value));
     ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_HFP_VOLUME,
                             value, sizeof(value));
     if (ret >= 0) {
@@ -362,4 +351,3 @@ void audio_extn_hfp_set_parameters(struct audio_device *adev, struct str_parms *
 exit:
     ALOGV("%s Exit",__func__);
 }
-#endif /*HFP_ENABLED*/
